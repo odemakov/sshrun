@@ -1,7 +1,7 @@
 package sshrun
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
 	"log"
 	"os"
@@ -38,12 +38,6 @@ type Pool struct {
     lock    sync.Mutex
 }
 
-type Result struct {
-    ExitCode int
-    Stdout   string
-    Stderr   string
-}
-
 func NewPool(config *RunConfig) *Pool {
     return &Pool{
         config:  config,
@@ -70,8 +64,8 @@ func (e *CommandError) Error() string {
     return fmt.Sprintf("Command '%s' execution error: %s", e.Cmd, e.Msg)
 }
 
-// Run: execute the command
-func (p *Pool) Run(sshCfg *SSHConfig, cmd string) (Result, error) {
+// Run: execute the command, return stdout and stderr to the callback functions
+func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), stderrCallback func(string)) (int, error) {
     if sshCfg.Port == 0 {
         sshCfg.Port = DefaultPort
     }
@@ -86,28 +80,77 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string) (Result, error) {
     }
     client, err := p.get(sshCfg)
     if err != nil {
-        return Result{}, &SSHError{Msg: err.Error()}
+        return 0, &SSHError{Msg: err.Error()}
     }
     session, err := client.NewSession()
     if err != nil {
-        return Result{}, &SSHError{Msg: err.Error()}
+        return 0, &SSHError{Msg: err.Error()}
     }
     defer session.Close()
 
-    // run the command, get stderr, stdout and error_code
-    var stdout, stderr bytes.Buffer
-    session.Stdout = &stdout
-    session.Stderr = &stderr
+    stdoutPipe, err := session.StdoutPipe()
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+    stderrPipe, err := session.StderrPipe()
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+
+    stdoutChan := make(chan string)
+    stderrChan := make(chan string)
+
+    go func() {
+        scanner := bufio.NewScanner(stdoutPipe)
+        for scanner.Scan() {
+            line := scanner.Text()
+            stdoutChan <- line
+        }
+        close(stdoutChan)
+    }()
+
+    go func() {
+        scanner := bufio.NewScanner(stderrPipe)
+        for scanner.Scan() {
+            line := scanner.Text()
+            stderrChan <- line
+        }
+        close(stderrChan)
+    }()
+
+    err = session.Start(cmd)
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+
+    closedChannels := 0
+    for closedChannels < 2 {
+        select {
+        case line, ok := <-stdoutChan:
+            if ok {
+                stdoutCallback(line)
+            } else {
+                closedChannels++
+            }
+        case line, ok := <-stderrChan:
+            if ok {
+                stderrCallback(line)
+            } else {
+                closedChannels++
+            }
+        }
+    }
+
+    err = session.Wait()
     exitCode := 0
-    err = session.Run(cmd)
     if err != nil {
         if exitError, ok := err.(*ssh.ExitError); ok {
             exitCode = exitError.ExitStatus()
-            return Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()}, &CommandError{Cmd: cmd, Msg: err.Error()}
+            return exitCode, &CommandError{Cmd: cmd, Msg: err.Error()}
         }
-        return Result{}, &SSHError{Msg: err.Error()}
+        return 0, &SSHError{Msg: err.Error()}
     }
-    return Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()}, nil
+    return exitCode, nil
 }
 
 // Put: releases a client connection
@@ -115,9 +158,9 @@ func (p *Pool) Put(host string) {
     p.lock.Lock()
     defer p.lock.Unlock()
 
-    p.logDebug("Releasing connection for host: %s", host)
+    p.logDebug("Releasing connection to host: %s", host)
     if client, exists := p.connMap[host]; exists {
-        p.logDebug("Connection released for host: %s", host)
+        p.logDebug("Connection released to host: %s", host)
         client.Close()
         delete(p.connMap, host)
     }
@@ -132,7 +175,7 @@ func (p *Pool) ClosePool() {
     for host, client := range p.connMap {
         client.Close()
         delete(p.connMap, host)
-        p.logDebug("Closed connection for host: %s", host)
+        p.logDebug("Closed connection to host: %s", host)
     }
 }
 
@@ -145,7 +188,7 @@ func (p *Pool) get(sshCfg *SSHConfig) (*ssh.Client, error) {
 
     // Check if a connection to the host exists
     if client, exists := p.connMap[sshCfg.Host]; exists {
-        p.logDebug("Reusing existing connection for host: %s", sshCfg.Host)
+        p.logDebug("Reusing existing connection to host: %s", sshCfg.Host)
         return client, nil
     }
 
@@ -155,7 +198,7 @@ func (p *Pool) get(sshCfg *SSHConfig) (*ssh.Client, error) {
         log.Printf("Created new connection %s@%s:%d", sshCfg.User, sshCfg.Host, sshCfg.Port)
         p.connMap[sshCfg.Host] = client
     } else {
-        log.Printf("Failed to create connection for host: %s, error: %v", sshCfg.Host, err)
+        log.Printf("Failed to create connection to host: %s, error: %v", sshCfg.Host, err)
     }
     return client, err
 }
