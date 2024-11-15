@@ -13,7 +13,7 @@ import (
 )
 
 const (
-    DefaultPort = 22
+    DefaultPort    = 22
     DefaultTimeout = 10 * time.Second
 )
 
@@ -90,7 +90,13 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), s
         return 0, &SSHError{Msg: err.Error()}
     }
 
-    p.handleOutput(stdoutChan, stderrChan, stdoutCallback, stderrCallback)
+    wg := &sync.WaitGroup{}
+    wg.Add(2)
+
+    go p.readChannel(stdoutChan, stdoutCallback, wg)
+    go p.readChannel(stderrChan, stderrCallback, wg)
+
+    wg.Wait() // Ensure all output has been processed before proceeding.
 
     return p.waitForSession(session, cmd)
 }
@@ -120,14 +126,13 @@ func (p *Pool) setupPipes(session *ssh.Session) (chan string, chan string, error
         return nil, nil, &SSHError{Msg: err.Error()}
     }
 
-    stdoutChan := make(chan string)
-    stderrChan := make(chan string)
+    stdoutChan := make(chan string, 100)
+    stderrChan := make(chan string, 100)
 
     go func() {
         scanner := bufio.NewScanner(stdoutPipe)
         for scanner.Scan() {
-            line := scanner.Text()
-            stdoutChan <- line
+            stdoutChan <- scanner.Text()
         }
         close(stdoutChan)
     }()
@@ -135,8 +140,7 @@ func (p *Pool) setupPipes(session *ssh.Session) (chan string, chan string, error
     go func() {
         scanner := bufio.NewScanner(stderrPipe)
         for scanner.Scan() {
-            line := scanner.Text()
-            stderrChan <- line
+            stderrChan <- scanner.Text()
         }
         close(stderrChan)
     }()
@@ -144,22 +148,11 @@ func (p *Pool) setupPipes(session *ssh.Session) (chan string, chan string, error
     return stdoutChan, stderrChan, nil
 }
 
-func (p *Pool) handleOutput(stdoutChan, stderrChan chan string, stdoutCallback, stderrCallback func(string)) {
-    closedChannels := 0
-    for closedChannels < 2 {
-        select {
-        case line, ok := <-stdoutChan:
-            if ok {
-                stdoutCallback(line)
-            } else {
-                closedChannels++
-            }
-        case line, ok := <-stderrChan:
-            if ok {
-                stderrCallback(line)
-            } else {
-                closedChannels++
-            }
+func (p *Pool) readChannel(ch chan string, callback func(string), wg *sync.WaitGroup) {
+    defer wg.Done()
+    for line := range ch {
+        if callback != nil {
+            callback(line + "\n")
         }
     }
 }
@@ -231,7 +224,7 @@ func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
 func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
     var authMethod ssh.AuthMethod
     if cfg.PrivateKey != "" {
-        // open private key
+        // open file
         privateKeyFile, err := os.ReadFile(cfg.PrivateKey)
         if err != nil {
             return nil, err
@@ -245,12 +238,12 @@ func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
     } else {
         authMethod = ssh.Password(cfg.Password)
     }
-    
+
     sshConfig := &ssh.ClientConfig{
-        User: cfg.User,
-        Auth: []ssh.AuthMethod{authMethod},
+        User:            cfg.User,
+        Auth:            []ssh.AuthMethod{authMethod},
         HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-        Timeout: cfg.Timeout,
+        Timeout:         cfg.Timeout,
     }
     p.logDebug("Dialing %s@%s:%d timeout:%v", sshConfig.User, cfg.Host, cfg.Port, sshConfig.Timeout)
     client, err := ssh.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), sshConfig)
