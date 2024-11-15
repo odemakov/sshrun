@@ -66,6 +66,36 @@ func (e *CommandError) Error() string {
 
 // Run: execute the command, return stdout and stderr to the callback functions
 func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), stderrCallback func(string)) (int, error) {
+    if stdoutCallback == nil && stderrCallback == nil {
+        return 0, &CommandError{Cmd: cmd, Msg: "Both stdoutCallback and stderrCallback are nil"}
+    }
+    p.prepareSSHConfig(sshCfg)
+    client, err := p.getSession(sshCfg)
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+    session, err := client.NewSession()
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+    defer session.Close()
+
+    stdoutChan, stderrChan, err := p.setupPipes(session)
+    if err != nil {
+        return 0, err
+    }
+
+    err = session.Start(cmd)
+    if err != nil {
+        return 0, &SSHError{Msg: err.Error()}
+    }
+
+    p.handleOutput(stdoutChan, stderrChan, stdoutCallback, stderrCallback)
+
+    return p.waitForSession(session, cmd)
+}
+
+func (p *Pool) prepareSSHConfig(sshCfg *SSHConfig) {
     if sshCfg.Port == 0 {
         sshCfg.Port = DefaultPort
     }
@@ -78,23 +108,16 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), s
     if sshCfg.Password == "" {
         sshCfg.Password = p.config.Password
     }
-    client, err := p.get(sshCfg)
-    if err != nil {
-        return 0, &SSHError{Msg: err.Error()}
-    }
-    session, err := client.NewSession()
-    if err != nil {
-        return 0, &SSHError{Msg: err.Error()}
-    }
-    defer session.Close()
+}
 
+func (p *Pool) setupPipes(session *ssh.Session) (chan string, chan string, error) {
     stdoutPipe, err := session.StdoutPipe()
     if err != nil {
-        return 0, &SSHError{Msg: err.Error()}
+        return nil, nil, &SSHError{Msg: err.Error()}
     }
     stderrPipe, err := session.StderrPipe()
     if err != nil {
-        return 0, &SSHError{Msg: err.Error()}
+        return nil, nil, &SSHError{Msg: err.Error()}
     }
 
     stdoutChan := make(chan string)
@@ -118,11 +141,10 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), s
         close(stderrChan)
     }()
 
-    err = session.Start(cmd)
-    if err != nil {
-        return 0, &SSHError{Msg: err.Error()}
-    }
+    return stdoutChan, stderrChan, nil
+}
 
+func (p *Pool) handleOutput(stdoutChan, stderrChan chan string, stdoutCallback, stderrCallback func(string)) {
     closedChannels := 0
     for closedChannels < 2 {
         select {
@@ -140,8 +162,10 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), s
             }
         }
     }
+}
 
-    err = session.Wait()
+func (p *Pool) waitForSession(session *ssh.Session, cmd string) (int, error) {
+    err := session.Wait()
     exitCode := 0
     if err != nil {
         if exitError, ok := err.(*ssh.ExitError); ok {
@@ -179,8 +203,8 @@ func (p *Pool) ClosePool() {
     }
 }
 
-// Get: retrieves or establishes an SSH session
-func (p *Pool) get(sshCfg *SSHConfig) (*ssh.Client, error) {
+// getSession: retrieves or establishes an SSH session
+func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
     p.lock.Lock()
     defer p.lock.Unlock()
 
