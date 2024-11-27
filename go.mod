@@ -1,6 +1,6 @@
 module github.com/odemakov/sshrun
 
-go 1.22.4
+go 1.23.3
 
 require golang.org/x/crypto v0.29.0
 
