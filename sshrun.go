@@ -2,8 +2,7 @@ package sshrun
 
 import (
 	"bufio"
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
@@ -13,14 +12,15 @@ import (
 )
 
 const (
-    DefaultPort    = 22
-    DefaultTimeout = 10 * time.Second
+    DefaultPort     = 22
+    DefaultTimeout  = 10 * time.Second
+    DefaultLogLevel = slog.LevelError
 )
 
 type RunConfig struct {
-    Debug      bool
     PrivateKey string
     Password   string
+    LogLevel   slog.Level
 }
 
 type SSHConfig struct {
@@ -39,6 +39,14 @@ type Pool struct {
 }
 
 func NewPool(config *RunConfig) *Pool {
+    logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+        Level: func() slog.Level {
+            if config.LogLevel != 0 {
+                return config.LogLevel
+            }
+            return DefaultLogLevel
+        }(),
+    }))
     return &Pool{
         config:  config,
         connMap: make(map[string]*ssh.Client),
@@ -51,23 +59,33 @@ type SSHError struct {
 }
 
 func (e *SSHError) Error() string {
-    return fmt.Sprintf("SSH error: %s", e.Msg)
+    return e.Msg
 }
 
 // CommandError represents an error that occurred during command execution.
 type CommandError struct {
-    Cmd string
     Msg string
 }
 
 func (e *CommandError) Error() string {
-    return fmt.Sprintf("Command '%s' execution error: %s", e.Cmd, e.Msg)
+    return e.Msg
+}
+
+var logger = slog.Default()
+
+// RunCombined: execute the command, return combined stdout and stderr to the callback function
+func (p *Pool) RunCombined(sshCfg *SSHConfig, cmd string, callback func(string)) (int, error) {
+    return p.Run(sshCfg, cmd, func(stdout string) {
+        callback(stdout)
+    }, func(stderr string) {
+        callback(stderr)
+    })
 }
 
 // Run: execute the command, return stdout and stderr to the callback functions
 func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), stderrCallback func(string)) (int, error) {
     if stdoutCallback == nil && stderrCallback == nil {
-        return 0, &CommandError{Cmd: cmd, Msg: "Both stdoutCallback and stderrCallback are nil"}
+        return 0, &CommandError{Msg: "Both stdoutCallback and stderrCallback are nil"}
     }
     p.prepareSSHConfig(sshCfg)
     client, err := p.getSession(sshCfg)
@@ -98,7 +116,7 @@ func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), s
 
     wg.Wait() // Ensure all output has been processed before proceeding.
 
-    return p.waitForSession(session, cmd)
+    return p.waitForSession(session)
 }
 
 func (p *Pool) prepareSSHConfig(sshCfg *SSHConfig) {
@@ -157,13 +175,13 @@ func (p *Pool) readChannel(ch chan string, callback func(string), wg *sync.WaitG
     }
 }
 
-func (p *Pool) waitForSession(session *ssh.Session, cmd string) (int, error) {
+func (p *Pool) waitForSession(session *ssh.Session) (int, error) {
     err := session.Wait()
     exitCode := 0
     if err != nil {
         if exitError, ok := err.(*ssh.ExitError); ok {
             exitCode = exitError.ExitStatus()
-            return exitCode, &CommandError{Cmd: cmd, Msg: err.Error()}
+            return exitCode, &CommandError{Msg: err.Error()}
         }
         return 0, &SSHError{Msg: err.Error()}
     }
@@ -175,9 +193,9 @@ func (p *Pool) Put(host string) {
     p.lock.Lock()
     defer p.lock.Unlock()
 
-    p.logDebug("Releasing connection to host: %s", host)
+    logger.Debug("Releasing connection", "host", host)
     if client, exists := p.connMap[host]; exists {
-        p.logDebug("Connection released to host: %s", host)
+        logger.Debug("Connection released", "host", host)
         client.Close()
         delete(p.connMap, host)
     }
@@ -188,11 +206,11 @@ func (p *Pool) ClosePool() {
     p.lock.Lock()
     defer p.lock.Unlock()
 
-    p.logDebug("Closing all connections in the pool")
+    logger.Debug("Closing all connections in the pool")
     for host, client := range p.connMap {
         client.Close()
         delete(p.connMap, host)
-        p.logDebug("Closed connection to host: %s", host)
+        logger.Debug("Closed connection", "host", host)
     }
 }
 
@@ -201,23 +219,23 @@ func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
     p.lock.Lock()
     defer p.lock.Unlock()
 
-    p.logDebug("Attempting to get connection %s@%s:%d", sshCfg.User, sshCfg.Host, sshCfg.Port)
+    logger.Debug("Attempting to get connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
 
     // Check if a connection to the host exists
     if client, exists := p.connMap[sshCfg.Host]; exists {
-        p.logDebug("Reusing existing connection to host: %s", sshCfg.Host)
+        logger.Debug("Reusing existing connection", "host", sshCfg.Host)
         return client, nil
     }
 
     // Create a new SSH client
     client, err := p.createClient(sshCfg)
     if err == nil {
-        log.Printf("Created new connection %s@%s:%d", sshCfg.User, sshCfg.Host, sshCfg.Port)
+        logger.Debug("Created new connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
         p.connMap[sshCfg.Host] = client
+        return client, nil
     } else {
-        log.Printf("Failed to create connection to host: %s, error: %v", sshCfg.Host, err)
+        return nil, err
     }
-    return client, err
 }
 
 // CreateClient: create SSH client
@@ -245,17 +263,10 @@ func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
         HostKeyCallback: ssh.InsecureIgnoreHostKey(),
         Timeout:         cfg.Timeout,
     }
-    p.logDebug("Dialing %s@%s:%d timeout:%v", sshConfig.User, cfg.Host, cfg.Port, sshConfig.Timeout)
+    logger.Debug("Dialing", "user", sshConfig.User, "host", cfg.Host, "port", cfg.Port, "timeout", sshConfig.Timeout)
     client, err := ssh.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), sshConfig)
     if err != nil {
         return nil, err
     }
     return client, nil
-}
-
-// logDebug: logs debug messages if debug mode is enabled
-func (p *Pool) logDebug(format string, v ...interface{}) {
-    if p.config.Debug {
-        log.Printf(format, v...)
-    }
 }
