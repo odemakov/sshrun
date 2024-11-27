@@ -37,31 +37,28 @@ func main() {
     // Exec 15 concurrent commands. Default MaxSessions value for the SSHD server is 10, so
     // with 15 workers, 5 of them will fail.
     var wg sync.WaitGroup
-    for i := 0; i < 15; i++ {
-        wg.Add(1)
-        go func(i int) {
-            defer wg.Done()
-            log.Printf("Running command in goroutine %d", i)
-            result, err := sshPool.Run(sshCfg, "for i in {1..100}; do echo $i; sleep 1; done",
-                func(stdout string) {
-                    log.Printf("Goroutine %d - Stdout: %s", i, stdout)
-                },
-                func(stderr string) {
-                    log.Printf("Goroutine %d - Stderr: %s", i, stderr)
-                })
-            if err != nil {
-                switch e := err.(type) {
-                case *sshrun.SSHError:
-                    log.Printf("Goroutine %d - SSH error: %s", i, e.Msg)
-                case *sshrun.CommandError:
-                    log.Printf("Goroutine %d - Command error: %s", i, e.Msg)
-                default:
-                    log.Printf("Goroutine %d - Unknown error: %v", i, err)
-                }
-            } else {
-                log.Printf("Goroutine %d - Error code: %d", i, result)
+    for i := 0; i < 100; i++ {
+        log.Printf("Running command in loop %d", i)
+        //result, err := sshPool.Run(sshCfg, "for i in {1..100}; do echo $i; sleep 1; done",
+        result, err := sshPool.Run(sshCfg, "uptime",
+            func(stdout string) {
+                log.Printf("Loop %d - Stdout: %s", i, stdout)
+            },
+            func(stderr string) {
+                log.Printf("Loop %d - Stderr: %s", i, stderr)
+            })
+        if err != nil {
+            switch e := err.(type) {
+            case *sshrun.SSHError:
+                log.Printf("Loop %d - SSH error: %s", i, e.Msg)
+            case *sshrun.CommandError:
+                log.Printf("Loop %d - Command error: %s", i, e.Msg)
+            default:
+                log.Printf("Loop %d - Unknown error: %v", i, err)
             }
-        }(i)
+        } else {
+            log.Printf("Loop %d - Error code: %d", i, result)
+        }
     }
     wg.Wait()
 
