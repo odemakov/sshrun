@@ -18,24 +18,24 @@ const (
 )
 
 type RunConfig struct {
-	PrivateKey string
-	Password   string
-	LogLevel   slog.Level
+	DefaultPrivateKey string
+	DefaultPassword   string
+	LogLevel          slog.Level
 }
 
 type SSHConfig struct {
-	User		string
-	Host		string
-	Port		int
-	Password	string
-	PrivateKey  string
-	Timeout     time.Duration
+	User       string
+	Host       string
+	Port       int
+	Password   string
+	PrivateKey string
+	Timeout    time.Duration
 }
 
 type Pool struct {
 	config  *RunConfig
 	connMap map[string]*ssh.Client
-	lock	sync.Mutex
+	lock    sync.Mutex
 }
 
 func NewPool(config *RunConfig) *Pool {
@@ -127,10 +127,10 @@ func (p *Pool) prepareSSHConfig(sshCfg *SSHConfig) {
 		sshCfg.Timeout = DefaultTimeout
 	}
 	if sshCfg.PrivateKey == "" {
-		sshCfg.PrivateKey = p.config.PrivateKey
+		sshCfg.PrivateKey = p.config.DefaultPrivateKey
 	}
 	if sshCfg.Password == "" {
-		sshCfg.Password = p.config.Password
+		sshCfg.Password = p.config.DefaultPassword
 	}
 }
 
@@ -258,10 +258,10 @@ func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
 	}
 
 	sshConfig := &ssh.ClientConfig{
-		User:			cfg.User,
-		Auth:			[]ssh.AuthMethod{authMethod},
+		User:            cfg.User,
+		Auth:            []ssh.AuthMethod{authMethod},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:		 cfg.Timeout,
+		Timeout:         cfg.Timeout,
 	}
 	logger.Debug("Dialing", "user", sshConfig.User, "host", cfg.Host, "port", cfg.Port, "timeout", sshConfig.Timeout)
 	client, err := ssh.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), sshConfig)

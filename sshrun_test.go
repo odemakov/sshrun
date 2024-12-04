@@ -7,9 +7,9 @@ import (
 
 func TestPrepareSSHConfig(t *testing.T) {
 	defaultConfig := &RunConfig{
-		PrivateKey: "default_private_key",
-		Password:   "default_password",
-		LogLevel:   DefaultLogLevel,
+		DefaultPrivateKey: "default_private_key",
+		DefaultPassword:   "default_password",
+		LogLevel:          DefaultLogLevel,
 	}
 
 	pool := NewPool(defaultConfig)
