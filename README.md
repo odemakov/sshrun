@@ -24,8 +24,8 @@ func main() {
     }
 
     runCfg := &sshrun.RunConfig{
-        Debug: false,
-        PrivateKey: filepath.Join(homeDir, ".ssh", "id_rsa"),
+        DebugLevel: slog.LevelDebug,
+        DefaultPrivateKey: filepath.Join(homeDir, ".ssh", "id_rsa"),
     }
     sshPool := sshrun.NewPool(runCfg)
 
