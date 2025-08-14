@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"log/slog"
 
 	"github.com/odemakov/sshrun"
 )
@@ -24,7 +25,7 @@ func main() {
     }
 
     runCfg := &sshrun.RunConfig{
-        DebugLevel: slog.LevelDebug,
+        LogLevel: slog.LevelDebug,
         DefaultPrivateKey: filepath.Join(homeDir, ".ssh", "id_rsa"),
     }
     sshPool := sshrun.NewPool(runCfg)
