@@ -153,39 +153,7 @@ func (p *Pool) RunContext(ctx context.Context, sshCfg *SSHConfig, cmd string, st
 
 // Run: execute the command, return stdout and stderr to the callback functions
 func (p *Pool) Run(sshCfg *SSHConfig, cmd string, stdoutCallback func(string), stderrCallback func(string)) (int, error) {
-	if stdoutCallback == nil && stderrCallback == nil {
-		return 0, &CommandError{Msg: "Both stdoutCallback and stderrCallback are nil"}
-	}
-	p.prepareSSHConfig(sshCfg)
-	client, err := p.getSession(sshCfg)
-	if err != nil {
-		return 0, &SSHError{Msg: err.Error()}
-	}
-	session, err := client.NewSession()
-	if err != nil {
-		return 0, &SSHError{Msg: err.Error()}
-	}
-	defer session.Close()
-
-	stdoutChan, stderrChan, err := p.setupPipes(session)
-	if err != nil {
-		return 0, err
-	}
-
-	err = session.Start(cmd)
-	if err != nil {
-		return 0, &SSHError{Msg: err.Error()}
-	}
-
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
-
-	go p.readChannel(stdoutChan, stdoutCallback, wg)
-	go p.readChannel(stderrChan, stderrCallback, wg)
-
-	wg.Wait() // Ensure all output has been processed before proceeding.
-
-	return p.waitForSession(session)
+	return p.RunContext(context.Background(), sshCfg, cmd, stdoutCallback, stderrCallback)
 }
 
 func (p *Pool) prepareSSHConfig(sshCfg *SSHConfig) {
