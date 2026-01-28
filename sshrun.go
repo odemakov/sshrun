@@ -2,6 +2,7 @@ package sshrun
 
 import (
 	"bufio"
+	"context"
 	"log/slog"
 	"os"
 	"strconv"
@@ -80,6 +81,74 @@ func (p *Pool) RunCombined(sshCfg *SSHConfig, cmd string, callback func(string))
 	}, func(stderr string) {
 		callback(stderr)
 	})
+}
+
+// RunCombinedContext: execute the command with context support for cancellation
+func (p *Pool) RunCombinedContext(ctx context.Context, sshCfg *SSHConfig, cmd string, callback func(string)) (int, error) {
+	return p.RunContext(ctx, sshCfg, cmd, func(stdout string) {
+		callback(stdout)
+	}, func(stderr string) {
+		callback(stderr)
+	})
+}
+
+// RunContext: execute the command with context support, return stdout and stderr to the callback functions
+func (p *Pool) RunContext(ctx context.Context, sshCfg *SSHConfig, cmd string, stdoutCallback func(string), stderrCallback func(string)) (int, error) {
+	if stdoutCallback == nil && stderrCallback == nil {
+		return 0, &CommandError{Msg: "Both stdoutCallback and stderrCallback are nil"}
+	}
+	p.prepareSSHConfig(sshCfg)
+	client, err := p.getSession(sshCfg)
+	if err != nil {
+		return 0, &SSHError{Msg: err.Error()}
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return 0, &SSHError{Msg: err.Error()}
+	}
+	defer session.Close()
+
+	stdoutChan, stderrChan, err := p.setupPipes(session)
+	if err != nil {
+		return 0, err
+	}
+
+	err = session.Start(cmd)
+	if err != nil {
+		return 0, &SSHError{Msg: err.Error()}
+	}
+
+	// Watch for context cancellation
+	cancelled := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			logger.Debug("Context cancelled, terminating session")
+			session.Signal(ssh.SIGINT)
+			session.Close()
+			close(cancelled)
+		case <-cancelled:
+			// Session completed normally
+		}
+	}()
+
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+
+	go p.readChannel(stdoutChan, stdoutCallback, wg)
+	go p.readChannel(stderrChan, stderrCallback, wg)
+
+	wg.Wait()
+
+	// Check if context was cancelled
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+		close(cancelled) // Signal the cancellation goroutine to exit
+	}
+
+	return p.waitForSession(session)
 }
 
 // Run: execute the command, return stdout and stderr to the callback functions
