@@ -106,7 +106,7 @@ func (p *Pool) RunContext(ctx context.Context, sshCfg *SSHConfig, cmd string, st
 	if err != nil {
 		return 0, &SSHError{Msg: err.Error()}
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	stdoutChan, stderrChan, err := p.setupPipes(session)
 	if err != nil {
@@ -120,13 +120,18 @@ func (p *Pool) RunContext(ctx context.Context, sshCfg *SSHConfig, cmd string, st
 
 	// Watch for context cancellation
 	cancelled := make(chan struct{})
+	var closeOnce sync.Once
+	closeCancelled := func() {
+		closeOnce.Do(func() { close(cancelled) })
+	}
+
 	go func() {
 		select {
 		case <-ctx.Done():
 			logger.Debug("Context cancelled, terminating session")
-			session.Signal(ssh.SIGINT)
-			session.Close()
-			close(cancelled)
+			_ = session.Signal(ssh.SIGINT)
+			_ = session.Close()
+			closeCancelled()
 		case <-cancelled:
 			// Session completed normally
 		}
@@ -145,7 +150,7 @@ func (p *Pool) RunContext(ctx context.Context, sshCfg *SSHConfig, cmd string, st
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	default:
-		close(cancelled) // Signal the cancellation goroutine to exit
+		closeCancelled()
 	}
 
 	return p.waitForSession(session)
@@ -233,7 +238,7 @@ func (p *Pool) Put(host string) {
 	logger.Debug("Releasing connection", "host", host)
 	if client, exists := p.connMap[host]; exists {
 		logger.Debug("Connection released", "host", host)
-		client.Close()
+		_ = client.Close()
 		delete(p.connMap, host)
 	}
 }
@@ -245,7 +250,7 @@ func (p *Pool) ClosePool() {
 
 	logger.Debug("Closing all connections in the pool")
 	for host, client := range p.connMap {
-		client.Close()
+		_ = client.Close()
 		delete(p.connMap, host)
 		logger.Debug("Closed connection", "host", host)
 	}
