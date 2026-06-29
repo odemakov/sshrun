@@ -235,15 +235,17 @@ func (p *Pool) waitForSession(session *ssh.Session) (int, error) {
 }
 
 // Put: releases a client connection
-func (p *Pool) Put(host string) {
+func (p *Pool) Put(cfg *SSHConfig) {
+	p.prepareSSHConfig(cfg)
+	key := connKey(cfg)
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	logger.Debug("Releasing connection", "host", host)
-	if client, exists := p.connMap[host]; exists {
-		logger.Debug("Connection released", "host", host)
+	logger.Debug("Releasing connection", "key", key)
+	if client, exists := p.connMap[key]; exists {
+		logger.Debug("Connection released", "key", key)
 		_ = client.Close()
-		delete(p.connMap, host)
+		delete(p.connMap, key)
 	}
 }
 
@@ -260,14 +262,19 @@ func (p *Pool) ClosePool() {
 	}
 }
 
+func connKey(cfg *SSHConfig) string {
+	return cfg.User + "@" + cfg.Host + ":" + strconv.Itoa(cfg.Port)
+}
+
 // getSession: retrieves or establishes an SSH session
 func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
+	key := connKey(sshCfg)
 	logger.Debug("Attempting to get connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
 
 	// Check cache without holding lock during dial — holding the mutex across
 	// ssh.Dial would block all other node checks while one host is unreachable.
 	p.lock.Lock()
-	if client, exists := p.connMap[sshCfg.Host]; exists {
+	if client, exists := p.connMap[key]; exists {
 		p.lock.Unlock()
 		logger.Debug("Reusing existing connection", "host", sshCfg.Host)
 		return client, nil
@@ -283,11 +290,11 @@ func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
 	// Re-acquire lock to store; handle race where another goroutine connected same host first.
 	p.lock.Lock()
 	defer p.lock.Unlock()
-	if existing, exists := p.connMap[sshCfg.Host]; exists {
+	if existing, exists := p.connMap[key]; exists {
 		_ = client.Close()
 		return existing, nil
 	}
-	p.connMap[sshCfg.Host] = client
+	p.connMap[key] = client
 	return client, nil
 }
 
