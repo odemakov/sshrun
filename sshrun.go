@@ -3,6 +3,7 @@ package sshrun
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const (
@@ -23,6 +25,7 @@ type RunConfig struct {
 	DefaultPrivateKey string
 	DefaultPassword   string
 	LogLevel          slog.Level
+	HostKeyCallback   ssh.HostKeyCallback
 }
 
 type SSHConfig struct {
@@ -305,10 +308,19 @@ func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
 		authMethod = ssh.Password(cfg.Password)
 	}
 
+	hkc := p.config.HostKeyCallback
+	if hkc == nil {
+		var err error
+		hkc, err = knownhosts.New(os.ExpandEnv("$HOME/.ssh/known_hosts"))
+		if err != nil {
+			return nil, fmt.Errorf("host key verification: %w", err)
+		}
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            []ssh.AuthMethod{authMethod},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hkc,
 	}
 
 	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
