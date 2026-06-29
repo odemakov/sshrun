@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -258,38 +259,43 @@ func (p *Pool) ClosePool() {
 
 // getSession: retrieves or establishes an SSH session
 func (p *Pool) getSession(sshCfg *SSHConfig) (*ssh.Client, error) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
 	logger.Debug("Attempting to get connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
 
-	// Check if a connection to the host exists
+	// Check cache without holding lock during dial — holding the mutex across
+	// ssh.Dial would block all other node checks while one host is unreachable.
+	p.lock.Lock()
 	if client, exists := p.connMap[sshCfg.Host]; exists {
+		p.lock.Unlock()
 		logger.Debug("Reusing existing connection", "host", sshCfg.Host)
 		return client, nil
 	}
+	p.lock.Unlock()
 
-	// Create a new SSH client
 	client, err := p.createClient(sshCfg)
-	if err == nil {
-		logger.Debug("Created new connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
-		p.connMap[sshCfg.Host] = client
-		return client, nil
-	} else {
+	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Created new connection", "user", sshCfg.User, "host", sshCfg.Host, "port", sshCfg.Port)
+
+	// Re-acquire lock to store; handle race where another goroutine connected same host first.
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	if existing, exists := p.connMap[sshCfg.Host]; exists {
+		_ = client.Close()
+		return existing, nil
+	}
+	p.connMap[sshCfg.Host] = client
+	return client, nil
 }
 
-// CreateClient: create SSH client
+// createClient: create SSH client
 func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
 	var authMethod ssh.AuthMethod
 	if cfg.PrivateKey != "" {
-		// open file
 		privateKeyFile, err := os.ReadFile(cfg.PrivateKey)
 		if err != nil {
 			return nil, err
 		}
-		// read private key
 		privateKey, err := ssh.ParsePrivateKey(privateKeyFile)
 		if err != nil {
 			return nil, err
@@ -303,12 +309,29 @@ func (p *Pool) createClient(cfg *SSHConfig) (*ssh.Client, error) {
 		User:            cfg.User,
 		Auth:            []ssh.AuthMethod{authMethod},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         cfg.Timeout,
 	}
-	logger.Debug("Dialing", "user", sshConfig.User, "host", cfg.Host, "port", cfg.Port, "timeout", sshConfig.Timeout)
-	client, err := ssh.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), sshConfig)
+
+	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
+	logger.Debug("Dialing", "user", sshConfig.User, "host", cfg.Host, "port", cfg.Port, "timeout", cfg.Timeout)
+
+	// Dial TCP with timeout, then apply the same deadline to the SSH handshake.
+	// ssh.Dial's Timeout only covers TCP connect; the handshake can hang indefinitely.
+	conn, err := net.DialTimeout("tcp", addr, cfg.Timeout)
 	if err != nil {
 		return nil, err
 	}
-	return client, nil
+	if err := conn.SetDeadline(time.Now().Add(cfg.Timeout)); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, sshConfig)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	return ssh.NewClient(c, chans, reqs), nil
 }
